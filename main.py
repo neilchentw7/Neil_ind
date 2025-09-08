@@ -197,9 +197,11 @@ def compute_neil(
 # ====== 自動欄位偵測 ======
 COMMON_ALIASES = {
     "timestamp": ["timestamp", "time", "datetime", "date", "日期", "時間"],
-    "profit": ["profit", "gross profit", "profit_gross", "win", "獲利", "盈利"],
-    "loss": ["loss", "gross loss", "loss_gross", "lose", "虧損"],
+    "profit": ["profit", "gross profit", "profit_gross", "win", "獲利", "盈利", "profit ()", "profit($)", "profit(\u0024)"],
+    "loss": ["loss", "gross loss", "loss_gross", "lose", "虧損", "loss ()", "loss($)", "loss(\u0024)"],
     "netpnl": ["netpnl", "pnl", "net pnl", "net_profit", "net", "盈虧", "淨損益"],
+    "gross_profit": ["gross profit", "gross_profit", "total profit", "毛利", "總獲利"],
+    "gross_loss": ["gross loss", "gross_loss", "total loss", "毛損", "總虧損"],
     "equity": ["equity", "balance", "networth", "nav", "淨值", "資金曲線"],
 }
 
@@ -235,15 +237,30 @@ if uploaded is not None:
         xls = pd.ExcelFile(uploaded)
         sheets = xls.sheet_names
         st.success(f"已載入工作表：{sheets}")
-        default_idx = sheets.index("Hourly Period Analysis") if "Hourly Period Analysis" in sheets else 0
+        default_idx = sheets.index("Periodical Analysis") if "Periodical Analysis" in sheets else 0
         sheet_name = st.selectbox(
-            "選擇要分析的工作表 (預設嘗試 'Hourly Period Analysis')",
+            "選擇要分析的工作表 (預設嘗試 'Periodical Analysis')",
             options=sheets,
             index=min(default_idx, len(sheets) - 1),
         )
-        df = pd.read_excel(uploaded, sheet_name=sheet_name)
 
-        st.subheader("原始資料預覽")
+        # 先不設表頭讀入，讓使用者指定『標題列在第幾行』（1 起算）
+        st.subheader("工作表前幾行（尚未套用表頭）")
+        raw_preview = pd.read_excel(uploaded, sheet_name=sheet_name, header=None)
+        st.dataframe(raw_preview.head(10), use_container_width=True)
+        header_row_ui = st.number_input(
+            "標題列在第幾行？(1=第一行)", 
+            min_value=1, 
+            max_value=max(1, len(raw_preview)), 
+            value=3,  # 預設第三行
+            step=1
+        )
+        header_row = int(header_row_ui) - 1  # pandas 以 0 起算
+
+        # 依使用者指定的表頭列重新讀取
+        df = pd.read_excel(uploaded, sheet_name=sheet_name, header=header_row)
+
+        st.subheader("原始資料預覽（已套用表頭）")
         st.dataframe(df.head(20), use_container_width=True)
 
         # 欄位對應設定（自動偵測 + 可覆寫）
@@ -255,6 +272,8 @@ if uploaded is not None:
         autod_loss = guess_column(df, "loss")
         autod_net = guess_column(df, "netpnl")
         autod_equity = guess_column(df, "equity")
+        autod_gprofit = guess_column(df, "gross_profit")
+        autod_gloss = guess_column(df, "gross_loss")
 
         def opt_index(name: str) -> int:
             return col_options.index(name) if name in col_options else 0
@@ -267,12 +286,22 @@ if uploaded is not None:
         col_profit = st.selectbox(
             "PROFIT 欄位（可選）",
             options=col_options,
-            index=opt_index(autod_profit if autod_profit != "<無>" else ("PROFIT" if "PROFIT" in df.columns else "<無>")),
+            index=opt_index(autod_profit if autod_profit != "<無>" else ("Profit" if "Profit" in df.columns else "<無>")),
         )
         col_loss = st.selectbox(
             "LOSS 欄位（可選）",
             options=col_options,
-            index=opt_index(autod_loss if autod_loss != "<無>" else ("LOSS" if "LOSS" in df.columns else "<無>")),
+            index=opt_index(autod_loss if autod_loss != "<無>" else ("Loss" if "Loss" in df.columns else "<無>")),
+        )
+        col_gprofit = st.selectbox(
+            "Gross Profit 欄位（可選，用於推算 NetPnL）",
+            options=col_options,
+            index=opt_index(autod_gprofit),
+        )
+        col_gloss = st.selectbox(
+            "Gross Loss 欄位（可選，用於推算 NetPnL）",
+            options=col_options,
+            index=opt_index(autod_gloss),
         )
         col_net = st.selectbox(
             "NetPnL/盈虧 欄位（可選，若提供則優先使用）",
@@ -299,9 +328,16 @@ if uploaded is not None:
         else:
             idx = pd.RangeIndex(start=0, stop=len(df), step=1)
 
-        # 計算 NetPnL
+        # 計算 NetPnL 的優先順序：
+        # 1) 直接使用 NetPnL
+        # 2) 使用 Gross Profit - Gross Loss
+        # 3) 使用 Profit - Loss
         if col_net != "<無>" and col_net in df.columns:
             pnl = pd.to_numeric(df[col_net], errors="coerce").fillna(0.0)
+        elif (col_gprofit != "<無>" and col_gprofit in df.columns) and (col_gloss != "<無>" and col_gloss in df.columns):
+            gprofit = pd.to_numeric(df[col_gprofit], errors="coerce").fillna(0.0)
+            gloss = pd.to_numeric(df[col_gloss], errors="coerce").fillna(0.0)
+            pnl = gprofit - gloss
         else:
             prof = (
                 pd.to_numeric(df[col_profit], errors="coerce").fillna(0.0)
@@ -447,4 +483,4 @@ if uploaded is not None:
     except Exception as e:
         st.error(f"讀取或分析時發生錯誤：{e}")
 else:
-    st.info("請先上傳 Excel 檔再開始分析。支援 .xlsx，若遇欄位命名不同，請在『欄位對應設定』選擇對應欄位。")
+    st.info("請先上傳 Excel 檔再開始分析。支援 .xlsx；若標題列不是第一行，可在上方選擇『標題列在第幾行』後重讀。")
